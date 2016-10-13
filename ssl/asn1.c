@@ -155,6 +155,8 @@ int asn1_get_int(const uint8_t *buf, int *offset, uint8_t **object)
     }
 
     *object = (uint8_t *)malloc(len);
+    if (!*object)
+        return X509_OUT_OF_MEMORY;
     memcpy(*object, &buf[*offset], len);
     *offset += len;
 
@@ -358,11 +360,15 @@ static int asn1_get_printable_str(const uint8_t *buf, int *offset, char **str)
 
     (*offset)++;
     len = get_asn1_length(buf, offset);
+    if (len < 1)
+        goto end_pnt_str;
 
     if (asn1_type == ASN1_UNICODE_STR)
     {
         int i;
         *str = (char *)malloc(len/2+1);     /* allow for null */
+        if (!*str)
+            return X509_OUT_OF_MEMORY;
 
         for (i = 0; i < len; i += 2)
             (*str)[i/2] = buf[*offset + i + 1];
@@ -372,6 +378,9 @@ static int asn1_get_printable_str(const uint8_t *buf, int *offset, char **str)
     else
     {
         *str = (char *)malloc(len+1);       /* allow for null */
+        if (!*str)
+            return X509_OUT_OF_MEMORY;
+
         memcpy(*str, &buf[*offset], len);
         (*str)[len] = 0;                    /* null terminate */
     }
@@ -478,8 +487,14 @@ int asn1_signature(const uint8_t *cert, int *offset, X509_CTX *x509_ctx)
         goto end_sig;
 
     x509_ctx->sig_len = get_asn1_length(cert, offset)-1;
+    if (x509_ctx->sig_len < 0)
+        return x509_ctx->sig_len;
+
     (*offset)++;            /* ignore bit string padding bits */
     x509_ctx->signature = (uint8_t *)malloc(x509_ctx->sig_len);
+    if (!x509_ctx->signature)
+        return X509_OUT_OF_MEMORY;
+
     memcpy(x509_ctx->signature, &cert[*offset], x509_ctx->sig_len);
     *offset += x509_ctx->sig_len;
     ret = X509_OK;

@@ -77,7 +77,7 @@ static bigint *bi_int_multiply(BI_CTX *ctx, bigint *bi, comp i);
 static bigint *bi_int_divide(BI_CTX *ctx, bigint *biR, comp denom);
 static bigint *alloc(BI_CTX *ctx, int size);
 static bigint *trim(bigint *bi);
-static void more_comps(bigint *bi, int n);
+static bool more_comps(bigint *bi, int n);
 #if defined(CONFIG_BIGINT_KARATSUBA) || defined(CONFIG_BIGINT_BARRETT) || \
     defined(CONFIG_BIGINT_MONTGOMERY)
 static bigint *comp_right_shift(bigint *biR, int num_shifts);
@@ -93,19 +93,27 @@ static void check(const bigint *bi);
 
 /**
  * @brief Start a new bigint context.
- * @return A bigint context.
+ * @return A bigint context or NULL on out of memory.
  */
 BI_CTX *bi_initialize(void)
 {
     /* calloc() sets everything to zero */
     BI_CTX *ctx = (BI_CTX *)calloc(1, sizeof(BI_CTX));
-   
+
+    if (!ctx)
+        return NULL;
+
     /* the radix */
     ctx->bi_radix = alloc(ctx, 2); 
+    if (!ctx->bi_radix)
+        goto error;
     ctx->bi_radix->comps[0] = 0;
     ctx->bi_radix->comps[1] = 1;
     bi_permanent(ctx->bi_radix);
     return ctx;
+error:
+    free(ctx);
+    return NULL;
 }
 
 /**
@@ -244,11 +252,13 @@ void bi_free(BI_CTX *ctx, bigint *bi)
  * @brief Convert an (unsigned) integer into a bigint.
  * @param ctx [in]   The bigint session context.
  * @param i [in]     The (unsigned) integer to be converted.
- * 
+ * @return A bigint or NULL on out of memory.
  */
 bigint *int_to_bi(BI_CTX *ctx, comp i)
 {
     bigint *biR = alloc(ctx, 1);
+    if (!biR)
+        return NULL;
     biR->comps[0] = i;
     return biR;
 }
@@ -257,10 +267,13 @@ bigint *int_to_bi(BI_CTX *ctx, comp i)
  * @brief Do a full copy of the bigint object.
  * @param ctx [in]   The bigint session context.
  * @param bi  [in]   The bigint object to be copied.
+ * @return The cloned bigint or NULL on out of memory.
  */
 bigint *bi_clone(BI_CTX *ctx, const bigint *bi)
 {
     bigint *biR = alloc(ctx, bi->size);
+    if (!biR)
+        return NULL;
     check(bi);
     memcpy(biR->comps, bi->comps, bi->size*COMP_BYTE_SIZE);
     return biR;
@@ -271,7 +284,9 @@ bigint *bi_clone(BI_CTX *ctx, const bigint *bi)
  * @param ctx [in]  The bigint session context.
  * @param bia [in]  A bigint.
  * @param bib [in]  Another bigint.
- * @return The result of the addition.
+ * @return The result of the addition or NULL on out of memory.
+ *
+ * Consumes bia and bib even on error.
  */
 bigint *bi_add(BI_CTX *ctx, bigint *bia, bigint *bib)
 {
@@ -283,8 +298,10 @@ bigint *bi_add(BI_CTX *ctx, bigint *bia, bigint *bib)
     check(bib);
 
     n = max(bia->size, bib->size);
-    more_comps(bia, n+1);
-    more_comps(bib, n);
+    if (!more_comps(bia, n+1))
+        goto error;
+    if (!more_comps(bib, n))
+        goto error;
     pa = bia->comps;
     pb = bib->comps;
 
@@ -301,6 +318,11 @@ bigint *bi_add(BI_CTX *ctx, bigint *bia, bigint *bib)
     *pa = carry;                  /* do overflow */
     bi_free(ctx, bib);
     return trim(bia);
+
+error:
+    bi_free(ctx, bia);
+    bi_free(ctx, bib);
+    return NULL;
 }
 
 /**
@@ -310,7 +332,10 @@ bigint *bi_add(BI_CTX *ctx, bigint *bia, bigint *bib)
  * @param bib [in]  Another bigint.
  * @param is_negative [out] If defined, indicates that the result was negative.
  * is_negative may be null.
- * @return The result of the subtraction. The result is always positive.
+ * @return The result of the subtraction, or NULL on out of memory. The result
+ *         is always positive.
+ *
+ * Consumes bia and bib even on error.
  */
 bigint *bi_subtract(BI_CTX *ctx, 
         bigint *bia, bigint *bib, int *is_negative)
@@ -321,7 +346,8 @@ bigint *bi_subtract(BI_CTX *ctx,
     check(bia);
     check(bib);
 
-    more_comps(bib, n);
+    if (!more_comps(bib, n))
+        goto error;
     pa = bia->comps;
     pb = bib->comps;
 
@@ -342,22 +368,33 @@ bigint *bi_subtract(BI_CTX *ctx,
 
     bi_free(ctx, trim(bib));    /* put bib back to the way it was */
     return trim(bia);
+
+error:
+    bi_free(ctx, bib);
+    bi_free(ctx, bia);
+    return NULL;
 }
 
 /**
  * Perform a multiply between a bigint an an (unsigned) integer
+ *
+ * Returns NULL on out of memory. Consumes bia, even on error.
  */
 static bigint *bi_int_multiply(BI_CTX *ctx, bigint *bia, comp b)
 {
     int j = 0, n = bia->size;
     bigint *biR = alloc(ctx, n + 1);
     comp carry = 0;
-    comp *r = biR->comps;
+    comp *r;
     comp *a = bia->comps;
+
+    if (!biR)
+        goto error;
 
     check(bia);
 
     /* clear things to start with */
+    r = biR->comps;
     memset(r, 0, ((n+1)*COMP_BYTE_SIZE));
 
     do
@@ -370,6 +407,10 @@ static bigint *bi_int_multiply(BI_CTX *ctx, bigint *bia, comp b)
     *r = carry;
     bi_free(ctx, bia);
     return trim(biR);
+
+error:
+    bi_free(ctx, bia);
+    return NULL;
 }
 
 /**
@@ -381,7 +422,9 @@ static bigint *bi_int_multiply(BI_CTX *ctx, bigint *bia, comp b)
  * @param v [in]    Either the denominator or the modulus depending on the mode.
  * @param is_mod [n] Determines if this is a normal division (0) or a reduction
  * (1).
- * @return  The result of the division/reduction.
+ * @return  The result of the division/reduction or NULL on out of memory.
+ *
+ * Consumes u and v even on error.
  */
 bigint *bi_divide(BI_CTX *ctx, bigint *u, bigint *v, int is_mod)
 {
@@ -404,6 +447,9 @@ bigint *bi_divide(BI_CTX *ctx, bigint *u, bigint *v, int is_mod)
 
     quotient = alloc(ctx, m+1);
     tmp_u = alloc(ctx, n+1);
+    if (!quotient || !tmp_u)
+        goto error;
+
     v = trim(v);        /* make sure we have no leading 0's */
     d = (comp)((long_comp)COMP_RADIX/(V1+1));
 
@@ -414,6 +460,8 @@ bigint *bi_divide(BI_CTX *ctx, bigint *u, bigint *v, int is_mod)
     if (d > 1)
     {
         u = bi_int_multiply(ctx, u, d);
+        if (!u)
+            goto error;
 
         if (is_mod)
         {
@@ -422,12 +470,15 @@ bigint *bi_divide(BI_CTX *ctx, bigint *u, bigint *v, int is_mod)
         else
         {
             v = bi_int_multiply(ctx, v, d);
+            if (!v)
+                goto error;
         }
     }
 
     if (orig_u_size == u->size)  /* new digit position u0 */
     {
-        more_comps(u, orig_u_size + 1);
+        if (!more_comps(u, orig_u_size + 1))
+            goto error;
     }
 
     do
@@ -462,9 +513,14 @@ bigint *bi_divide(BI_CTX *ctx, bigint *u, bigint *v, int is_mod)
         if (q_dash)
         {
             int is_negative;
-            tmp_u = bi_subtract(ctx, tmp_u, 
-                    bi_int_multiply(ctx, bi_copy(v), q_dash), &is_negative);
-            more_comps(tmp_u, n+1);
+            bigint *v_times_q_dash = bi_int_multiply(ctx, bi_copy(v), q_dash);
+            if (!v_times_q_dash)
+                goto error;
+            tmp_u = bi_subtract(ctx, tmp_u, v_times_q_dash, &is_negative);
+            if (!tmp_u)
+                goto error;
+            if (!more_comps(tmp_u, n+1))
+                goto error;
 
             Q(j) = q_dash; 
 
@@ -473,6 +529,8 @@ bigint *bi_divide(BI_CTX *ctx, bigint *u, bigint *v, int is_mod)
             {
                 Q(j)--;
                 tmp_u = bi_add(ctx, tmp_u, bi_copy(v));
+                if (!tmp_u)
+                    goto error;
 
                 /* lop off the carry */
                 tmp_u->size--;
@@ -501,6 +559,17 @@ bigint *bi_divide(BI_CTX *ctx, bigint *u, bigint *v, int is_mod)
         bi_free(ctx, u);
         return trim(quotient);
     }
+
+error:
+    if (tmp_u)
+        bi_free(ctx, tmp_u);
+    if (quotient)
+        bi_free(ctx, quotient);
+    if (v)
+        bi_free(ctx, v);
+    if (u)
+        bi_free(ctx, u);
+    return NULL;
 }
 
 /*
@@ -584,6 +653,9 @@ static bigint *comp_right_shift(bigint *biR, int num_shifts)
 
 /**
  * Take each component and shift it up (in terms of components) 
+ *
+ * Returns the result or NULL on out of memory. Does NOT consume biR,
+ * even on error.
  */
 static bigint *comp_left_shift(bigint *biR, int num_shifts)
 {
@@ -597,7 +669,8 @@ static bigint *comp_left_shift(bigint *biR, int num_shifts)
         return biR;
     }
 
-    more_comps(biR, biR->size + num_shifts);
+    if (!more_comps(biR, biR->size + num_shifts))
+        return NULL;
 
     x = &biR->comps[i+num_shifts];
     y = &biR->comps[i];
@@ -617,12 +690,15 @@ static bigint *comp_left_shift(bigint *biR, int num_shifts)
  * @param ctx [in]  The bigint session context.
  * @param data [in] The data to be converted.
  * @param size [in] The number of bytes of data.
- * @return A bigint representing this data.
+ * @return A bigint representing this data, or NULL on out of memory.
  */
 bigint *bi_import(BI_CTX *ctx, const uint8_t *data, int size)
 {
     bigint *biR = alloc(ctx, (size+COMP_BYTE_SIZE-1)/COMP_BYTE_SIZE);
     int i, j = 0, offset = 0;
+
+    if (!biR)
+        return NULL;
 
     memset(biR->comps, 0, biR->size*COMP_BYTE_SIZE);
 
@@ -647,13 +723,17 @@ bigint *bi_import(BI_CTX *ctx, const uint8_t *data, int size)
  * @param ctx [in]  The bigint session context.
  * @param data [in] A string consisting of hex characters. The characters must
  * be in upper case.
- * @return A bigint representing this data.
+ * @return A bigint representing this data, or NULL on out of memory.
  */
 bigint *bi_str_import(BI_CTX *ctx, const char *data)
 {
     int size = strlen(data);
     bigint *biR = alloc(ctx, (size+COMP_NUM_NIBBLES-1)/COMP_NUM_NIBBLES);
     int i, j = 0, offset = 0;
+
+    if (!biR)
+        return NULL;
+
     memset(biR->comps, 0, biR->size*COMP_BYTE_SIZE);
 
     for (i = size-1; i >= 0; i--)
@@ -705,6 +785,8 @@ void bi_print(const char *label, bigint *x)
  * @param data [out] The converted data as a byte stream.
  * @param size [in] The maximum size of the byte stream. Unused bytes will be
  * zeroed.
+ *
+ * Consumes x.
  */
 void bi_export(BI_CTX *ctx, bigint *x, uint8_t *data, int size)
 {
@@ -744,26 +826,52 @@ buf_done:
  * standard modulus, and its two primes p and q. This offset refers to which
  * modulus we are referring to.
  * @see bi_free_mod(), bi_mod_power().
+ *
+ * Returns true on success, false on out of memory. Consumes bim even
+ * on error.
  */
-void bi_set_mod(BI_CTX *ctx, bigint *bim, int mod_offset)
+bool bi_set_mod(BI_CTX *ctx, bigint *bim, int mod_offset)
 {
     int k = bim->size;
     comp d = (comp)((long_comp)COMP_RADIX/(bim->comps[k-1]+1));
+    bigint *bim_norm;
 #ifdef CONFIG_BIGINT_MONTGOMERY
-    bigint *R, *R2;
+    bigint *R = NULL, *R2 = NULL, *radix_clone = NULL;
+#elif defined (CONFIG_BIGINT_BARRETT)
+    bigint *radix_clone = NULL, *radix_shifted;
 #endif
 
     ctx->bi_mod[mod_offset] = bim;
     bi_permanent(ctx->bi_mod[mod_offset]);
-    ctx->bi_normalised_mod[mod_offset] = bi_int_multiply(ctx, bim, d);
+    bim_norm = bi_int_multiply(ctx, bim, d);
+    if (!bim_norm)
+        goto error;
+    ctx->bi_normalised_mod[mod_offset] = bim_norm;
     bi_permanent(ctx->bi_normalised_mod[mod_offset]);
 
 #if defined(CONFIG_BIGINT_MONTGOMERY)
     /* set montgomery variables */
-    R = comp_left_shift(bi_clone(ctx, ctx->bi_radix), k-1);     /* R */
-    R2 = comp_left_shift(bi_clone(ctx, ctx->bi_radix), k*2-1);  /* R^2 */
+    radix_clone = bi_clone(ctx, ctx->bi_radix);
+    if (!radix_clone)
+        goto error;
+    R = comp_left_shift(radix_clone, k-1);     /* R */
+    if (!R)
+        goto error;
+    radix_clone = bi_clone(ctx, ctx->bi_radix);
+    if (!radix_clone)
+        goto error;
+    R2 = comp_left_shift(radix_clone, k*2-1);  /* R^2 */
+    if (!R2)
+        goto error;
+    /* radix_clone contents now belong to R2, we must not free them
+     * even on error. */
+    radix_clone = NULL;
     ctx->bi_RR_mod_m[mod_offset] = bi_mod(ctx, R2);             /* R^2 mod m */
+    if (!ctx->bi_RR_mod_m[mod_offset])
+        goto error;
     ctx->bi_R_mod_m[mod_offset] = bi_mod(ctx, R);               /* R mod m */
+    if (!ctx->bi_R_mod_m[mod_offset])
+        goto error;
 
     bi_permanent(ctx->bi_RR_mod_m[mod_offset]);
     bi_permanent(ctx->bi_R_mod_m[mod_offset]);
@@ -771,11 +879,49 @@ void bi_set_mod(BI_CTX *ctx, bigint *bim, int mod_offset)
     ctx->N0_dash[mod_offset] = modular_inverse(ctx->bi_mod[mod_offset]);
 
 #elif defined (CONFIG_BIGINT_BARRETT)
-    ctx->bi_mu[mod_offset] = 
-        bi_divide(ctx, comp_left_shift(
-            bi_clone(ctx, ctx->bi_radix), k*2-1), ctx->bi_mod[mod_offset], 0);
+    radix_clone = bi_clone(ctx, ctx->bi_radix);
+    if (!radix_clone)
+        goto error;
+    radix_shifted = comp_left_shift(radix_clone, k*2-1);
+    if (!radix_shifted)
+        goto error;
+    /* radix_clone contents now belong to radix_shifted, we must not
+     * free them even on error. */
+    radix_clone = NULL;
+    ctx->bi_mu[mod_offset] = bi_divide(ctx, radix_shifted,
+                                       ctx->bi_mod[mod_offset], 0);
+    if (!ctx->bi_mu[mod_offset])
+        goto error;
     bi_permanent(ctx->bi_mu[mod_offset]);
 #endif
+    return true;
+
+error:
+#ifdef CONFIG_BIGINT_MONTGOMERY
+    if (ctx->bi_RR_mod_m[mod_offset]) {
+        bi_free(ctx, ctx->bi_RR_mod_m[mod_offset]);
+        ctx->bi_RR_mod_m[mod_offset] = NULL;
+    }
+    if (R2)
+        bi_free(ctx, R2);
+    if (R)
+        bi_free(ctx, R);
+    if (radix_clone)
+        bi_free(ctx, radix_clone);
+#elif defined (CONFIG_BIGINT_BARRETT)
+    if (radix_clone)
+        bi_free(ctx, radix_clone);
+#endif
+    bi_depermanent(bim);
+    ctx->bi_mod[mod_offset] = NULL;
+    if (bim_norm) {
+        ctx->bi_normalised_mod[mod_offset] = NULL;
+        bi_depermanent(bim_norm);
+        bi_free(ctx, bim_norm);
+        bi_free(ctx, bim);
+    }
+    bi_free(ctx, bim);
+    return false;
 }
 
 /**
@@ -807,6 +953,8 @@ void bi_free_mod(BI_CTX *ctx, int mod_offset)
  * Barrett reduction has no need for some parts of the product, so ignore bits
  * of the multiply. This routine gives Barrett its big performance
  * improvements over Classical/Montgomery reduction methods. 
+ *
+ * Returns NULL on out of memory. Consumes bia and bib even on error.
  */
 static bigint *regular_multiply(BI_CTX *ctx, bigint *bia, bigint *bib, 
         int inner_partial, int outer_partial)
@@ -815,10 +963,16 @@ static bigint *regular_multiply(BI_CTX *ctx, bigint *bia, bigint *bib,
     int n = bia->size;
     int t = bib->size;
     bigint *biR = alloc(ctx, n + t);
-    comp *sr = biR->comps;
-    comp *sa = bia->comps;
-    comp *sb = bib->comps;
+    comp *sr;
+    comp *sa;
+    comp *sb;
 
+    if (!biR)
+        goto error;
+
+    sr = biR->comps;
+    sa = bia->comps;
+    sb = bib->comps;
     check(bia);
     check(bib);
 
@@ -856,6 +1010,11 @@ static bigint *regular_multiply(BI_CTX *ctx, bigint *bia, bigint *bib,
     bi_free(ctx, bia);
     bi_free(ctx, bib);
     return trim(biR);
+
+error:
+    bi_free(ctx, bib);
+    bi_free(ctx, bia);
+    return NULL;
 }
 
 #ifdef CONFIG_BIGINT_KARATSUBA
@@ -863,11 +1022,16 @@ static bigint *regular_multiply(BI_CTX *ctx, bigint *bia, bigint *bib,
  * Karatsuba improves on regular multiplication due to only 3 multiplications 
  * being done instead of 4. The additional additions/subtractions are O(N) 
  * rather than O(N^2) and so for big numbers it saves on a few operations 
+ *
+ * Returns NULL on out of memory. Consumes bia even on error. If
+ * is_square is false, consumes bib, even on error.
  */
 static bigint *karatsuba(BI_CTX *ctx, bigint *bia, bigint *bib, int is_square)
 {
-    bigint *x0, *x1;
+    bigint *x0, *x1 = NULL;
     bigint *p0, *p1, *p2;
+    bigint *y0 = NULL, *y1 = NULL;
+    bigint *x0_plus_x1 = NULL, *p1_minus_p2, *p0_plus_p2;
     int m;
 
     if (is_square)
@@ -880,38 +1044,97 @@ static bigint *karatsuba(BI_CTX *ctx, bigint *bia, bigint *bib, int is_square)
     }
 
     x0 = bi_clone(ctx, bia);
+    if (!x0)
+        goto error;
     x0->size = m;
     x1 = bi_clone(ctx, bia);
+    if (!x1)
+        goto error;
     comp_right_shift(x1, m);
     bi_free(ctx, bia);
+    bia = NULL;
 
     /* work out the 3 partial products */
     if (is_square)
     {
         p0 = bi_square(ctx, bi_copy(x0));
+        if (!p0)
+            goto error;
         p2 = bi_square(ctx, bi_copy(x1));
-        p1 = bi_square(ctx, bi_add(ctx, x0, x1));
+        if (!p2)
+            goto error;
+        x0_plus_x1 = bi_add(ctx, x0, x1);
+        x0 = x1 = NULL;
+        if (!x0_plus_x1)
+            goto error;
+        p1 = bi_square(ctx, x0_plus_x1);
+        x0_plus_x1 = NULL;
+        if (!p1)
+            goto error;
     }
     else /* normal multiply */
     {
-        bigint *y0, *y1;
+        bigint *y0_plus_y1;
+
         y0 = bi_clone(ctx, bib);
+        if (!y0)
+            goto error;
         y0->size = m;
         y1 = bi_clone(ctx, bib);
-        comp_right_shift(y1, m);
+        if (!y1)
+            goto error;
+        if (!comp_right_shift(y1, m))
+            goto error;
         bi_free(ctx, bib);
+        bib = NULL;
 
         p0 = bi_multiply(ctx, bi_copy(x0), bi_copy(y0));
         p2 = bi_multiply(ctx, bi_copy(x1), bi_copy(y1));
-        p1 = bi_multiply(ctx, bi_add(ctx, x0, x1), bi_add(ctx, y0, y1));
+        if (!p0 || !p2)
+            goto error;
+        x0_plus_x1 = bi_add(ctx, x0, x1);
+        y0_plus_y1 = bi_add(ctx, y0, y1);
+        x0 = x1 = y0 = y1 = NULL;
+        p1 = bi_multiply(ctx, x0_plus_x1, y0_plus_y1);
+        x0_plus_x1 = NULL;
+        if (!p1)
+            goto error;
     }
 
-    p1 = bi_subtract(ctx, 
-            bi_subtract(ctx, p1, bi_copy(p2), NULL), bi_copy(p0), NULL);
+    p1_minus_p2 = bi_subtract(ctx, p1, bi_copy(p2), NULL);
+    p1 = NULL;
+    if (!p1_minus_p2)
+        goto error;
+    p1 = bi_subtract(ctx, p1_minus_p2, bi_copy(p0), NULL);
+    if (!p1)
+        goto error;
 
-    comp_left_shift(p1, m);
-    comp_left_shift(p2, 2*m);
-    return bi_add(ctx, p1, bi_add(ctx, p0, p2));
+    if (!comp_left_shift(p1, m))
+        goto error;
+    if (!comp_left_shift(p2, 2*m))
+        goto error;
+    p0_plus_p2 = bi_add(ctx, p0, p2);
+    p0 = p2 = NULL;
+    if (!p0_plus_p2)
+        goto error;
+    return bi_add(ctx, p1, p0_plus_p2);
+
+error:
+    if (y2)
+        bi_free(ctx, y2);
+    if (y1)
+        bi_free(ctx, y1);
+    if (p2)
+        bi_free(ctx, p2);
+    if (p0)
+        bi_free(ctx, p0);
+    if (x1)
+        bi_free(ctx, x1);
+    if (x0)
+        bi_free(ctx, x0);
+    if (!is_square && bib)
+        bi_free(ctx, bib);
+    bi_free(ctx, bia);
 }
 #endif
 
@@ -920,7 +1143,9 @@ static bigint *karatsuba(BI_CTX *ctx, bigint *bia, bigint *bib, int is_square)
  * @param ctx [in]  The bigint session context.
  * @param bia [in]  A bigint.
  * @param bib [in]  Another bigint.
- * @return The result of the multiplication.
+ * @return The result of the multiplication or NULL on out of memory.
+ *
+ * Consumes bia and bib even on error.
  */
 bigint *bi_multiply(BI_CTX *ctx, bigint *bia, bigint *bib)
 {
@@ -942,15 +1167,22 @@ bigint *bi_multiply(BI_CTX *ctx, bigint *bia, bigint *bib)
 #ifdef CONFIG_BIGINT_SQUARE
 /*
  * Perform the actual square operion. It takes into account overflow.
+ *
+ * Returns NULL on out of memory. Consumes bi even on error.
  */
 static bigint *regular_square(BI_CTX *ctx, bigint *bi)
 {
     int t = bi->size;
     int i = 0, j;
     bigint *biR = alloc(ctx, t*2+1);
-    comp *w = biR->comps;
-    comp *x = bi->comps;
+    comp *w;
+    comp *x;
     long_comp carry;
+
+    if (!biR)
+        goto error;
+    w = biR->comps;
+    x = bi->comps;
     memset(w, 0, biR->size*COMP_BYTE_SIZE);
 
     do
@@ -991,13 +1223,19 @@ static bigint *regular_square(BI_CTX *ctx, bigint *bi)
 
     bi_free(ctx, bi);
     return trim(biR);
+
+error:
+    bi_free(ctx, bi);
+    return NULL;
 }
 
 /**
  * @brief Perform a square operation on a bigint.
  * @param ctx [in]  The bigint session context.
  * @param bia [in]  A bigint.
- * @return The result of the multiplication.
+ * @return The result of the multiplication or NULL on out of memory.
+ *
+ * Consumes bia even on error.
  */
 bigint *bi_square(BI_CTX *ctx, bigint *bia)
 {
@@ -1062,14 +1300,22 @@ int bi_compare(bigint *bia, bigint *bib)
 }
 
 /*
- * Allocate and zero more components.  Does not consume bi. 
+ * Allocate and zero more components.  Does not consume bi.
+ *
+ * Returns true on success, false on out of memory. On error,
+ * the original components are left untouched.
  */
-static void more_comps(bigint *bi, int n)
+static bool more_comps(bigint *bi, int n)
 {
+    comp *new_comps;
+
     if (n > bi->max_comps)
     {
         bi->max_comps = max(bi->max_comps * 2, n);
-        bi->comps = (comp*)realloc(bi->comps, bi->max_comps * COMP_BYTE_SIZE);
+        new_comps = (comp*)realloc(bi->comps, bi->max_comps * COMP_BYTE_SIZE);
+        if (!new_comps)
+            return false;
+        bi->comps = new_comps;
     }
 
     if (n > bi->size)
@@ -1078,11 +1324,14 @@ static void more_comps(bigint *bi, int n)
     }
 
     bi->size = n;
+    return true;
 }
 
 /*
  * Make a new empty bigint. It may just use an old one if one is available.
  * Otherwise get one off the heap.
+ *
+ * Returns NULL on out of memory.
  */
 static bigint *alloc(BI_CTX *ctx, int size)
 {
@@ -1103,13 +1352,20 @@ static bigint *alloc(BI_CTX *ctx, int size)
             abort();    /* create a stack trace from a core dump */
         }
 
-        more_comps(biR, size);
+        if (!more_comps(biR, size))
+            return NULL;
     }
     else
     {
         /* No free bigints available - create a new one. */
         biR = (bigint *)malloc(sizeof(bigint));
+        if (!biR)
+            return NULL;
         biR->comps = (comp*)malloc(size * COMP_BYTE_SIZE);
+        if (!biR->comps) {
+            free(biR);
+            return NULL;
+        }
         biR->max_comps = size;  /* give some space to spare */
     }
 
@@ -1207,7 +1463,9 @@ static bigint *trim(bigint *bi)
  * @brief Perform a single montgomery reduction.
  * @param ctx [in]  The bigint session context.
  * @param bixy [in]  A bigint.
- * @return The result of the montgomery reduction.
+ * @return The result of the montgomery reduction or NULL on out of memory.
+ *
+ * Consume bixy even on error.
  */
 bigint *bi_mont(BI_CTX *ctx, bigint *bixy)
 {
@@ -1215,6 +1473,7 @@ bigint *bi_mont(BI_CTX *ctx, bigint *bixy)
     uint8_t mod_offset = ctx->mod_offset;
     bigint *bim = ctx->bi_mod[mod_offset];
     comp mod_inv = ctx->N0_dash[mod_offset];
+    bigint *mult_temp = NULL;
 
     check(bixy);
 
@@ -1228,8 +1487,15 @@ bigint *bi_mont(BI_CTX *ctx, bigint *bixy)
 
     do
     {
-        bixy = bi_add(ctx, bixy, comp_left_shift(
-                    bi_int_multiply(ctx, bim, bixy->comps[i]*mod_inv), i));
+        mult_temp = bi_int_multiply(ctx, bim, bixy->comps[i]*mod_inv);
+        if (!mult_temp)
+            goto error;
+        if (!comp_left_shift(mult_temp, i))
+            goto error;
+        bixy = bi_add(ctx, bixy, mult_temp);
+        mult_temp = NULL;
+        if (!bixy)
+            goto error;
     } while (++i < n);
 
     comp_right_shift(bixy, n);
@@ -1240,6 +1506,12 @@ bigint *bi_mont(BI_CTX *ctx, bigint *bixy)
     }
 
     return bixy;
+
+error:
+    if (mult_temp)
+        bi_free(ctx, mult_temp);
+    if (bixy)
+        bi_free(ctx, bixy);
 }
 
 #elif defined(CONFIG_BIGINT_BARRETT)
@@ -1263,7 +1535,9 @@ static bigint *comp_mod(bigint *bi, int mod)
  * @brief Perform a single Barrett reduction.
  * @param ctx [in]  The bigint session context.
  * @param bi [in]  A bigint.
- * @return The result of the Barrett reduction.
+ * @return The result of the Barrett reduction or NULL on out of memory.
+ *
+ * Consumes bi even on error.
  */
 bigint *bi_barrett(BI_CTX *ctx, bigint *bi)
 {
@@ -1271,6 +1545,7 @@ bigint *bi_barrett(BI_CTX *ctx, bigint *bi)
     uint8_t mod_offset = ctx->mod_offset;
     bigint *bim = ctx->bi_mod[mod_offset];
     int k = bim->size;
+    bigint *bi_clone_, *q3_times_bim;
 
     check(bi);
     check(bim);
@@ -1282,16 +1557,27 @@ bigint *bi_barrett(BI_CTX *ctx, bigint *bi)
         return bi_mod(ctx, bi);
     }
 
-    q1 = comp_right_shift(bi_clone(ctx, bi), k-1);
+    bi_clone_ = bi_clone(ctx, bi);
+    if (!bi_clone_)
+        goto error;
+    q1 = comp_right_shift(bi_clone_, k-1);
 
     /* do outer partial multiply */
-    q2 = regular_multiply(ctx, q1, ctx->bi_mu[mod_offset], 0, k-1); 
+    q2 = regular_multiply(ctx, q1, ctx->bi_mu[mod_offset], 0, k-1);
+    if (!q2)
+        goto error;
     q3 = comp_right_shift(q2, k+1);
     r1 = comp_mod(bi, k+1);
 
     /* do inner partial multiply */
-    r2 = comp_mod(regular_multiply(ctx, q3, bim, k+1, 0), k+1);
+    q3_times_bim = regular_multiply(ctx, q3, bim, k+1, 0);
+    if (!q3_times_bim)
+        goto error;
+    r2 = comp_mod(q3_times_bim, k+1);
     r = bi_subtract(ctx, r1, r2, NULL);
+    bi = NULL;
+    if (!r)
+        goto error;
 
     /* if (r >= m) r = r - m; */
     if (bi_compare(r, bim) >= 0)
@@ -1300,36 +1586,67 @@ bigint *bi_barrett(BI_CTX *ctx, bigint *bi)
     }
 
     return r;
+
+error:
+    if (bi)
+        bi_free(ctx, bi);
+    return NULL;
 }
 #endif /* CONFIG_BIGINT_BARRETT */
 
 #ifdef CONFIG_BIGINT_SLIDING_WINDOW
 /*
  * Work out g1, g3, g5, g7... etc for the sliding-window algorithm 
+ *
+ * Returns true on success, false on out of memory. Does not consume
+ * g1.
  */
-static void precompute_slide_window(BI_CTX *ctx, int window, bigint *g1)
+static bool precompute_slide_window(BI_CTX *ctx, int window, bigint *g1)
 {
     int k = 1, i;
-    bigint *g2;
+    bigint *g2 = NULL, *g0_square;
 
     for (i = 0; i < window-1; i++)   /* compute 2^(window-1) */
     {
         k <<= 1;
     }
 
-    ctx->g = (bigint **)malloc(k*sizeof(bigint *));
+    ctx->g = (bigint **)calloc(k, sizeof(bigint *));
+    if (!ctx->g)
+        return NULL;
     ctx->g[0] = bi_clone(ctx, g1);
+    if (!ctx->g[0])
+        goto error;
     bi_permanent(ctx->g[0]);
-    g2 = bi_residue(ctx, bi_square(ctx, ctx->g[0]));   /* g^2 */
+    g0_square = bi_square(ctx, ctx->g[0]);
+    if (!g0_square)
+        goto error;
+    g2 = bi_residue(ctx, g0_square);   /* g^2 */
+    if (!g2)
+        goto error;
 
     for (i = 1; i < k; i++)
     {
         ctx->g[i] = bi_residue(ctx, bi_multiply(ctx, ctx->g[i-1], bi_copy(g2)));
+        if (!ctx->g[i])
+            goto error;
         bi_permanent(ctx->g[i]);
     }
 
     bi_free(ctx, g2);
     ctx->window = k;
+    return true;
+
+error:
+    if (g2)
+        bi_free(ctx, g2);
+    for (i = 0; (i < k) && ctx->g[i]; i++) {
+        bi_depermanent(ctx->g[i]);
+        bi_free(ctx, ctx->g[i]);
+    }
+    free(ctx->g);
+    ctx->g = NULL;
+    return false;
 }
 #endif
 
@@ -1341,21 +1658,36 @@ static void precompute_slide_window(BI_CTX *ctx, int window, bigint *g1)
  * @param ctx [in]  The bigint session context.
  * @param bi  [in]  The bigint on which to perform the mod power operation.
  * @param biexp [in] The bigint exponent.
- * @return The result of the mod exponentiation operation
+ * @return The result of the mod exponentiation operation or NULL on out out
+ *         memory
  * @see bi_set_mod().
+ *
+ * Consumes bi and biexp even on error.
  */
 bigint *bi_mod_power(BI_CTX *ctx, bigint *bi, bigint *biexp)
 {
     int i = find_max_exp_index(biexp), j, window_size = 1;
     bigint *biR = int_to_bi(ctx, 1);
 
+#ifndef CONFIG_BIGINT_SLIDING_WINDOW
+    ctx->g = NULL;
+    ctx->window = 0;
+#endif
+    if (!biR)
+        goto error;
+
 #if defined(CONFIG_BIGINT_MONTGOMERY)
     uint8_t mod_offset = ctx->mod_offset;
     if (!ctx->use_classical)
     {
         /* preconvert */
-        bi = bi_mont(ctx, 
-                bi_multiply(ctx, bi, ctx->bi_RR_mod_m[mod_offset]));    /* x' */
+        bigint *mult_temp = bi_multiply(ctx, bi, ctx->bi_RR_mod_m[mod_offset]);
+        bi = NULL;
+        if (!mult_temp)
+            goto error;
+        bi = bi_mont(ctx, mult_temp);    /* x' */
+        if (!bi)
+            goto error;
         bi_free(ctx, biR);
         biR = ctx->bi_R_mod_m[mod_offset];                              /* A */
     }
@@ -1369,10 +1701,15 @@ bigint *bi_mod_power(BI_CTX *ctx, bigint *bi, bigint *biexp)
         window_size++;
 
     /* work out the slide constants */
-    precompute_slide_window(ctx, window_size, bi);
+    if (!precompute_slide_window(ctx, window_size, bi))
+        goto error;
 #else   /* just one constant */
     ctx->g = (bigint **)malloc(sizeof(bigint *));
+    if (!ctx->g)
+        goto error;
     ctx->g[0] = bi_clone(ctx, bi);
+    if (!ctx->g[0])
+        goto error;
     ctx->window = 1;
     bi_permanent(ctx->g[0]);
 #endif
@@ -1397,7 +1734,13 @@ bigint *bi_mod_power(BI_CTX *ctx, bigint *bi, bigint *biexp)
             /* build up the section of the exponent */
             for (j = i; j >= l; j--)
             {
-                biR = bi_residue(ctx, bi_square(ctx, biR));
+                bigint *biR_square = bi_square(ctx, biR);
+                biR = NULL;
+                if (!biR_square)
+                    goto error;
+                biR = bi_residue(ctx, biR_square);
+                if (!biR)
+                    goto error;
                 if (exp_bit_is_one(biexp, j))
                     part_exp++;
 
@@ -1406,12 +1749,23 @@ bigint *bi_mod_power(BI_CTX *ctx, bigint *bi, bigint *biexp)
             }
 
             part_exp = (part_exp-1)/2;  /* adjust for array */
-            biR = bi_residue(ctx, bi_multiply(ctx, biR, ctx->g[part_exp]));
+            biR = bi_multiply(ctx, biR, ctx->g[part_exp]);
+            if (!biR)
+                goto error;
+            biR = bi_residue(ctx, biR);
+            if (!biR)
+                goto error;
             i = l-1;
         }
         else    /* square it */
         {
-            biR = bi_residue(ctx, bi_square(ctx, biR));
+            bigint *biR_square = bi_square(ctx, biR);
+            biR = NULL;
+            if (!biR_square)
+                goto error;
+            biR = bi_residue(ctx, biR_square);
+            if (!biR)
+                goto error;
             i--;
         }
     } while (i >= 0);
@@ -1431,6 +1785,23 @@ bigint *bi_mod_power(BI_CTX *ctx, bigint *bi, bigint *biexp)
 #else /* CONFIG_BIGINT_CLASSICAL or CONFIG_BIGINT_BARRETT */
     return biR;
 #endif
+
+error:
+#ifndef CONFIG_BIGINT_SLIDING_WINDOW
+    if (ctx->g) {
+        for (i = 0; (i < ctx->window) && ctx->g[i]; i++)
+        {
+            bi_depermanent(ctx->g[i]);
+            bi_free(ctx, ctx->g[i]);
+        }
+        free(ctx->g);
+        ctx->g = NULL;
+    }
+#endif
+    if (bi)
+        bi_free(ctx, bi);
+    bi_free(ctx, biexp);
+    return NULL;
 }
 
 #ifdef CONFIG_SSL_CERT_VERIFICATION
@@ -1443,23 +1814,44 @@ bigint *bi_mod_power(BI_CTX *ctx, bigint *bi, bigint *biexp)
  * @param bi  [in]  The bigint to perform the exp/mod.
  * @param bim [in]  The temporary modulus.
  * @param biexp [in] The bigint exponent.
- * @return The result of the mod exponentiation operation
+ * @return The result of the mod exponentiation operation or NULL on out of
+ *         memory
  * @see bi_set_mod().
+ *
+ * Consumes bi, bim and biexp even on error.
  */
 bigint *bi_mod_power2(BI_CTX *ctx, bigint *bi, bigint *bim, bigint *biexp)
 {
-    bigint *biR, *tmp_biR;
+    bigint *biR = NULL, *tmp_biR = NULL, *bim_clone, *bi_clone_ = NULL;
+    bigint *biexp_clone;
+    bool set_mod_done = false;
 
     /* Set up a temporary bigint context and transfer what we need between
      * them. We need to do this since we want to keep the original modulus
      * which is already in this context. This operation is only called when
      * doing peer verification, and so is not expensive :-) */
     BI_CTX *tmp_ctx = bi_initialize();
-    bi_set_mod(tmp_ctx, bi_clone(tmp_ctx, bim), BIGINT_M_OFFSET);
-    tmp_biR = bi_mod_power(tmp_ctx, 
-                bi_clone(tmp_ctx, bi), 
-                bi_clone(tmp_ctx, biexp));
+    if (!tmp_ctx)
+        goto error;
+    bim_clone = bi_clone(tmp_ctx, bim);
+    if (!bim_clone)
+        goto error;
+    if (!bi_set_mod(tmp_ctx, bim_clone, BIGINT_M_OFFSET))
+        goto error;
+    set_mod_done = true;
+    bi_clone_ = bi_clone(tmp_ctx, bi);
+    if (!bi_clone_)
+        goto error;
+    biexp_clone = bi_clone(tmp_ctx, biexp);
+    if (!biexp_clone)
+        goto error;
+    tmp_biR = bi_mod_power(tmp_ctx, bi_clone_, biexp_clone);
+    bi_clone_ = NULL;
+    if (!tmp_biR)
+        goto error;
     biR = bi_clone(ctx, tmp_biR);
+    if (!biR)
+        goto error;
     bi_free(tmp_ctx, tmp_biR);
     bi_free_mod(tmp_ctx, BIGINT_M_OFFSET);
     bi_terminate(tmp_ctx);
@@ -1468,6 +1860,20 @@ bigint *bi_mod_power2(BI_CTX *ctx, bigint *bi, bigint *bim, bigint *biexp)
     bi_free(ctx, bim);
     bi_free(ctx, biexp);
     return biR;
+
+error:
+    if (tmp_biR)
+        bi_free(tmp_ctx, tmp_biR);
+    if (bi_clone_)
+        bi_free(tmp_ctx, bi_clone_);
+    if (set_mod_done)
+        bi_free_mod(tmp_ctx, BIGINT_M_OFFSET);
+    if (tmp_ctx)
+        bi_terminate(tmp_ctx);
+    bi_free(ctx, bi);
+    bi_free(ctx, bim);
+    bi_free(ctx, biexp);
+    return NULL;
 }
 #endif
 
@@ -1482,13 +1888,15 @@ bigint *bi_mod_power2(BI_CTX *ctx, bigint *bi, bigint *bim, bigint *biexp)
  * @param p [in] CRT's p bigint
  * @param q [in] CRT's q bigint
  * @param qInv [in] CRT's qInv bigint
- * @return The result of the CRT operation
+ * @return The result of the CRT operation or NULL on out of memory
+ *
+ * Consumes bi, dP, dQ, p, q, qInv even on error.
  */
 bigint *bi_crt(BI_CTX *ctx, bigint *bi,
         bigint *dP, bigint *dQ,
         bigint *p, bigint *q, bigint *qInv)
 {
-    bigint *m1, *m2, *h;
+    bigint *m1 = NULL, *m2 = NULL, *h, *m1_plus_p, *q_times_h;
 
     /* Montgomery has a condition the 0 < x, y < m and these products violate
      * that condition. So disable Montgomery when using CRT */
@@ -1497,18 +1905,61 @@ bigint *bi_crt(BI_CTX *ctx, bigint *bi,
 #endif
     ctx->mod_offset = BIGINT_P_OFFSET;
     m1 = bi_mod_power(ctx, bi_copy(bi), dP);
+    dP = NULL;
+    if (!m1)
+        goto error;
 
     ctx->mod_offset = BIGINT_Q_OFFSET;
     m2 = bi_mod_power(ctx, bi, dQ);
+    dQ = bi = NULL;
+    if (!m2)
+        goto error;
 
-    h = bi_subtract(ctx, bi_add(ctx, m1, p), bi_copy(m2), NULL);
+    m1_plus_p = bi_add(ctx, m1, p);
+    p = NULL;
+    if (!m1_plus_p)
+        goto error;
+    h = bi_subtract(ctx, m1_plus_p, bi_copy(m2), NULL);
+    if (!h)
+        goto error;
     h = bi_multiply(ctx, h, qInv);
+    qInv = NULL;
+    if (!h)
+        goto error;
     ctx->mod_offset = BIGINT_P_OFFSET;
     h = bi_residue(ctx, h);
+    if (!h)
+        goto error;
 #if defined(CONFIG_BIGINT_MONTGOMERY)
     ctx->use_classical = 0;         /* reset for any further operation */
 #endif
-    return bi_add(ctx, m2, bi_multiply(ctx, q, h));
+    q_times_h = bi_multiply(ctx, q, h);
+    q = h = NULL;
+    if (!q_times_h)
+        goto error;
+    return bi_add(ctx, m2, q_times_h);
+
+error:
+#if defined(CONFIG_BIGINT_MONTGOMERY)
+    ctx->use_classical = 0;         /* reset for any further operation */
+#endif
+    if (q)
+        bi_free(ctx, q);
+    if (qInv)
+        bi_free(ctx, qInv);
+    if (p)
+        bi_free(ctx, p);
+    if (dQ)
+        bi_free(ctx, dQ);
+    if (bi)
+        bi_free(ctx, bi);
+    if (m2)
+        bi_free(ctx, m2);
+    if (m1)
+        bi_free(ctx, m1);
+    if (dP)
+        bi_free(ctx, dP);
+    return NULL;
 }
 #endif
 /** @} */

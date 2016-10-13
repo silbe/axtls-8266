@@ -56,6 +56,7 @@ extern "C" {
 #define X509_VFY_ERROR_UNSUPPORTED_DIGEST   -8
 #define X509_INVALID_PRIV_KEY               -9
 #define X509_MAX_CERTS                      -10
+#define X509_OUT_OF_MEMORY                  -11
 
 /*
  * The Distinguished Name
